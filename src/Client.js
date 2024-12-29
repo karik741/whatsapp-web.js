@@ -932,22 +932,56 @@ class Client extends EventEmitter {
             );
         }
 
-        const newMessage = await this.pupPage.evaluate(async (chatId, message, options, sendSeen) => {
-            const chatWid = window.Store.WidFactory.createWid(chatId);
-            const chat = await window.Store.Chat.find(chatWid);
-
-
-            if (sendSeen) {
-                await window.WWebJS.sendSeen(chatId);
+        const sendChunkedMessage = async (chunks, options, chatId, sendSeen) => {
+            for (let i = 0; i < chunks.length; i++) {
+                const chunk = chunks[i];
+                await storeChunk(chatId, chunk, i);
             }
 
-            const msg = await window.WWebJS.sendMessage(chat, message, options, sendSeen);
-            return window.WWebJS.getMessageModel(msg);
-        }, chatId, content, internalOptions, sendSeen);
+            options.attachment.data = chunks.join('');
 
-        return new Message(this, newMessage);
+            return await sendMessageToPuppeteer(chatId, content, options, sendSeen);
+        };
+
+        const storeChunk = async (chatId, chunk, index) => {
+            await this.pupPage.evaluate(async (chatId, chunk, index) => {
+                window.Store[`mediaChunk_${chatId}_${index}`] = chunk;
+            }, chatId, chunk, index);
+        };
+
+        const sendMessageToPuppeteer = async (chatId, content, options, sendSeen) => {
+            const newMessage = await this.pupPage.evaluate(async (chatId, message, options, sendSeen) => {
+                const chatWid = window.Store.WidFactory.createWid(chatId);
+                const chat = await window.Store.Chat.find(chatWid);
+                if (sendSeen) {
+                    await window.WWebJS.sendSeen(chatId);
+                }
+
+                const msg = await window.WWebJS.sendMessage(chat, message, options, sendSeen);
+                return window.WWebJS.getMessageModel(msg);
+            }, chatId, content, options, sendSeen);
+
+            return newMessage;
+        };
+
+        const CHUNK_SIZE = 50 * 1024 * 1024;
+        if (internalOptions.attachment?.data?.length > CHUNK_SIZE) {
+            const fileData = internalOptions.attachment.data;
+            const chunks = [];
+
+            for (let i = 0; i < fileData.length; i += CHUNK_SIZE) {
+                chunks.push(fileData.substring(i, i + CHUNK_SIZE));
+            }
+
+            const newMessage = await sendChunkedMessage(chunks, internalOptions, chatId, sendSeen);
+            return new Message(this, newMessage);
+        } else {
+            const newMessage = await sendMessageToPuppeteer(chatId, content, internalOptions, sendSeen);
+            return new Message(this, newMessage);
+        }
     }
-    
+
+
     /**
      * Searches for messages
      * @param {string} query
